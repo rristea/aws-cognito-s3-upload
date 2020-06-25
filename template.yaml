@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: AWS SAM template which creates a backend for image hosting web app with Cognito Authentication
+Resources:
+  FrontendBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+  FrontendBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket:
+        Ref: FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject'
+            Effect: Allow
+            Resource:
+              'Fn::Sub': 'arn:aws:s3:::${FrontendBucket}/*'
+            Principal: '*'
+  FrontendProxyApi:
+    Type: 'AWS::ApiGatewayV2::Api'
+    Properties:
+      Name: Frontend Proxy
+      Description: Proxy needed for HTTPS
+      ProtocolType: HTTP
+      Target:
+        'Fn::Sub': 'http://${FrontendBucket}.s3-website-us-east-1.amazonaws.com'
+  BackendImageBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+        - AllowedHeaders:
+            - '*'
+          AllowedMethods:
+            - HEAD
+            - GET
+            - PUT
+            - POST
+            - DELETE
+          AllowedOrigins:
+            - '*'
+          ExposedHeaders:
+            - x-amz-server-side-encryption
+            - x-amz-request-id
+            - x-amz-id-2
+          MaxAge: 3000
+  BackendCognitoUserPool:
+    Type: 'AWS::Cognito::UserPool'
+    Properties:
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 6
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - AttributeDataType: String
+          Name: email
+          Required: false
+  BackendCognitoUserPoolClient:
+    Type: 'AWS::Cognito::UserPoolClient'
+    Properties:
+      UserPoolId:
+        Ref: BackendCognitoUserPool
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - 'Fn::Sub': 'https://${FrontendProxyApi}.execute-api.${AWS::Region}.amazonaws.com'
+      LogoutURLs:
+        - 'Fn::Sub': 'https://${FrontendProxyApi}.execute-api.${AWS::Region}.amazonaws.com'
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+  BackendUserPoolDomain:
+    Type: 'AWS::Cognito::UserPoolDomain'
+    Properties:
+      Domain:
+        Ref: FrontendProxyApi
+      UserPoolId:
+        Ref: BackendCognitoUserPool
+  BackendCognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId:
+            Ref: BackendCognitoUserPoolClient
+          ProviderName:
+            Fn::GetAtt: [BackendCognitoUserPool, ProviderName]
+  BackendCognitoIdentityPoolRoles:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId:
+        Ref: BackendCognitoIdentityPool
+      Roles:
+        authenticated:
+          Fn::GetAtt: [BackendCognitoAuthRole, Arn]
+        unauthenticated:
+          Fn::GetAtt: [BackendCognitoUnauthRole, Arn]
+  BackendCognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud":
+                  Ref: BackendCognitoIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: "CognitoAuthorizedPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource:
+                  'Fn::Sub': 'arn:aws:s3:::${BackendImageBucket}/*'
+  BackendCognitoUnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud":
+                  Ref: BackendCognitoIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+      Policies:
+        - PolicyName: "CognitoUnauthorizedPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                Resource: "*"
+Outputs:
+  Region:
+    Description: Region
+    Value:
+      Ref: 'AWS::Region'
+  FrontendBucketName:
+    Description: S3 bucket to hold the frontend client
+    Value:
+      Ref: FrontendBucket
+  BackendImageBucketName:
+    Description: S3 bucket where images are uploaded
+    Value:
+      Ref: BackendImageBucket
+  FrontendUrl:
+    Description: Frontend client URL
+    Value:
+      'Fn::Sub': 'https://${FrontendProxyApi}.execute-api.${AWS::Region}.amazonaws.com'
+  FrontendProxyApiId:
+    Description: API ID
+    Value:
+      Ref: FrontendProxyApi
+  BackendCognitoUserPoolId:
+    Description: Cognito User Pool Id
+    Value:
+      Ref: BackendCognitoUserPool
+  BackendCognitoUserPoolClientId:
+    Description: Cognito User Pool Client Id
+    Value:
+      Ref: BackendCognitoUserPoolClient
+  BackendCognitoIdentityPoolId:
+    Description: Cognito Identity Pool Id
+    Value:
+      Ref: BackendCognitoIdentityPool
